@@ -17,10 +17,15 @@
 ### 快速开始
 ```bash
 sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/476364984/frp-installer/main/install_frps.sh)"
+```
 
 ### 下载脚本
+```bash
 wget https://raw.githubusercontent.com/476364984/frp-installer/main/install_frps.sh
+```
 
-# 修改权限并运行
+### 修改权限并运行
+```bash
 chmod +x install_frps.sh
 sudo ./install_frps.sh --domain your.domain.com --port 443
+```
