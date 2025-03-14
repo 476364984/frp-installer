@@ -1,6 +1,6 @@
 # FRP 服务端一键安装器
 
-[![GitHub release](https://img.shields.io/github/v/release/476364984/frp-server-installer)](https://github.com/476364984/frp-server-installer)
+[![GitHub release](https://img.shields.io/github/v/release/476364984/frp-installer)](https://github.com/476364984/frp-installer)
 
 ## 功能特性
 - 全自动部署 FRP 服务端
@@ -16,4 +16,4 @@
 ## 使用指南
 ### 快速开始
 ```bash
-sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/476364984/frp-server-installer/main/install_frps.sh)"
+sudo bash -c "$(curl -fsSL https://raw.githubusercontent.com/476364984/frp-installer/main/install_frps.sh)"
