@@ -78,13 +78,10 @@ install_dependencies() {
         redhat)
             yum install -y curl openssl openssl-devel firewalld \
                 || fatal_error "依赖安装失败"
-            systemctl enable --now firewalld \
-                || echo -e "${YELLOW}⚠️ 防火墙启动失败，但继续安装...${NC}"
             ;;
         debian)
             apt update && apt install -y curl openssl ufw \
                 || fatal_error "依赖安装失败"
-            ufw --force enable || true
             ;;
     esac
 }
@@ -165,6 +162,67 @@ configure_port() {
             esac
         fi
     done
+}
+
+# 域名解析验证
+check_dns_resolution() {
+    echo -e "${BLUE}验证域名解析..."
+    local resolved_ip=$(dig +short A "$DOMAIN" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n1)
+    local public_ip=$(curl -4s icanhazip.com)
+
+    if [ -z "$resolved_ip" ]; then
+        echo -e "${YELLOW}⚠️ 无法解析域名：$DOMAIN"
+        read -p "是否继续安装？(y/N): " choice
+        [[ $choice =~ [yY] ]] || exit 1
+    elif [ "$resolved_ip" != "$public_ip" ]; then
+        echo -e "${RED}❌ 解析IP不匹配："
+        echo -e "  域名解析IP: $resolved_ip"
+        echo -e "  服务器公网IP: $public_ip"
+        read -p "是否继续安装？(y/N): " choice
+        [[ $choice =~ [yY] ]] || exit 1
+    else
+        echo -e "${GREEN}✅ 域名解析验证通过${NC}"
+    fi
+}
+
+# 智能防火墙配置
+configure_firewall() {
+    echo -e "${BLUE}[4/12] 检测防火墙状态..."
+    
+    case ${OS_TYPE} in
+        redhat)
+            if ! systemctl is-active firewalld &>/dev/null; then
+                echo -e "${YELLOW}⚠️ firewalld 未运行，跳过端口配置${NC}"
+                return
+            fi
+            ;;
+        debian)
+            if ! ufw status | grep -q 'Status: active'; then
+                echo -e "${YELLOW}⚠️ ufw 未启用，跳过端口配置${NC}"
+                return
+            fi
+            ;;
+    esac
+
+    echo -e "${BLUE}配置防火墙规则..."
+    case ${OS_TYPE} in
+        redhat)
+            firewall-cmd --permanent \
+                --add-port=${BIND_PORT}/tcp \
+                --add-port=${KCP_PORT}/udp \
+                --add-port=${QUIC_PORT}/udp \
+                --add-port=${DASH_PORT}/tcp
+            firewall-cmd --reload
+            ;;
+        debian)
+            ufw allow ${BIND_PORT}/tcp
+            ufw allow ${KCP_PORT}/udp
+            ufw allow ${QUIC_PORT}/udp
+            ufw allow ${DASH_PORT}/tcp
+            ufw reload
+            ;;
+    esac
+    echo -e "${GREEN}✅ 防火墙规则更新成功"
 }
 
 # 生成SSL证书
