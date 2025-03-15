@@ -1,7 +1,7 @@
 #!/bin/bash
-# FRPS 全自动部署脚本（终极增强版）
-# 版本：10.0
-# 功能：版本检测、智能下载、普罗米修斯监控、安全增强
+# FRPS 全自动部署脚本（终极整合增强版）
+# 版本：15.0
+# 功能：智能端口冲突处理、防火墙自动检测、安全增强、交互式配置
 
 ####################
 # 全局配置
@@ -39,7 +39,7 @@ fatal_error() {
 
 # 系统检测
 detect_system() {
-    echo -e "${BLUE}[1/12] 检测系统环境..."
+    echo -e "${BLUE}[1/15] 检测系统环境..."
     
     # 操作系统检测
     if [ -f /etc/os-release ]; then
@@ -73,7 +73,7 @@ detect_system() {
 
 # 安装必要依赖
 install_dependencies() {
-    echo -e "${BLUE}[2/12] 安装系统依赖..."
+    echo -e "${BLUE}[2/15] 安装系统依赖..."
     case ${OS_TYPE} in
         redhat)
             yum install -y curl openssl openssl-devel firewalld \
@@ -89,23 +89,87 @@ install_dependencies() {
     esac
 }
 
-# 端口冲突检测
-check_port() {
+# 增强版端口冲突检测
+check_port_conflict() {
     local port=$1
     local protocol=$2
     
     echo -e "${BLUE}检测端口 ${port}/${protocol}..."
-    if ss -tuln | grep -q ":${port} "; then
+    conflict_info=$(ss -tulp | grep ":${port} ")
+    if [ -n "$conflict_info" ]; then
         echo -e "${RED}❌ 端口冲突："
-        ss -tulp | grep ":${port} "
+        echo "$conflict_info"
         return 1
     fi
     return 0
 }
 
+# 智能端口配置（带冲突处理）
+configure_port() {
+    local prompt=$1
+    local default_port=$2
+    local protocol=$3
+    local varname=$4
+    
+    while true; do
+        read -p "${prompt} [默认${default_port}]: " input_port
+        port=${input_port:-$default_port}
+        
+        # 基础验证
+        if ! [[ "$port" =~ ^[0-9]+$ ]] || [ $port -lt 1 -o $port -gt 65535 ]; then
+            echo -e "${RED}错误：端口必须是1-65535之间的数字${NC}"
+            continue
+        fi
+
+        # 检测端口冲突
+        if check_port_conflict $port $protocol; then
+            echo -e "${GREEN}✅ 端口 ${port}/${protocol} 可用${NC}"
+            eval $varname=$port
+            break
+        else
+            echo -e "${YELLOW}⚠️ 端口冲突处理选项："
+            echo "1) 终止占用进程并继续使用此端口"
+            echo "2) 重新输入其他端口"
+            echo "3) 放弃安装"
+            read -p "请选择处理方式 [1/2/3]: " conflict_choice
+            
+            case $conflict_choice in
+                1)
+                    # 获取进程信息
+                    local pid=$(ss -tulp | grep ":${port} " | awk '{print $NF}' | cut -d= -f2 | sort -u)
+                    if [ -n "$pid" ]; then
+                        echo -e "${YELLOW}正在终止进程 PID: ${pid}..."
+                        kill -9 $pid 2>/dev/null
+                        sleep 1
+                        if check_port_conflict $port $protocol; then
+                            echo -e "${GREEN}✅ 进程已终止，端口 ${port}/${protocol} 可用${NC}"
+                            eval $varname=$port
+                            break
+                        else
+                            echo -e "${RED}❌ 进程终止失败，请手动处理${NC}"
+                        fi
+                    else
+                        echo -e "${RED}❌ 无法获取进程信息，请手动处理${NC}"
+                    fi
+                    ;;
+                2)
+                    continue
+                    ;;
+                3)
+                    echo -e "${RED}安装已中止${NC}"
+                    exit 1
+                    ;;
+                *)
+                    echo -e "${RED}无效选择，请重新输入${NC}"
+                    ;;
+            esac
+        fi
+    done
+}
+
 # 生成SSL证书
 generate_cert() {
-    echo -e "${BLUE}[3/12] 生成SSL证书..."
+    echo -e "${BLUE}[3/15] 生成SSL证书..."
     mkdir -p "${CERTS_DIR}"
     
     if [ "${ACCESS_TYPE}" = "1" ]; then
@@ -123,59 +187,72 @@ generate_cert() {
     echo -e "${GREEN}✅ 证书生成成功：${CERTS_DIR}/"
 }
 
-# 配置防火墙
-configure_firewall() {
-    echo -e "${BLUE}[4/12] 配置防火墙..."
-    
+# 检测防火墙状态
+check_firewall_status() {
     case ${OS_TYPE} in
         redhat)
+            if systemctl is-active firewalld &>/dev/null; then
+                echo -e "${GREEN}检测到 firewalld 正在运行${NC}"
+                return 0
+            else
+                echo -e "${YELLOW}firewalld 未运行，跳过端口配置${NC}"
+                return 1
+            fi
+            ;;
+        debian)
+            if dpkg -l ufw | grep -q '^ii' && ufw status | grep -q 'Status: active'; then
+                echo -e "${GREEN}检测到 ufw 正在运行${NC}"
+                return 0
+            else
+                echo -e "${YELLOW}ufw 未启用，跳过端口配置${NC}"
+                return 1
+            fi
+            ;;
+    esac
+}
+
+# 智能防火墙配置
+configure_firewall() {
+    echo -e "${BLUE}[4/15] 检测防火墙状态..."
+    
+    if ! check_firewall_status; then
+        echo -e "${YELLOW}⚠️ 跳过防火墙配置${NC}"
+        return 0
+    fi
+
+    echo -e "${BLUE}配置防火墙规则..."
+    case ${OS_TYPE} in
+        redhat)
+            echo -e "${GREEN}添加防火墙规则..."
             firewall-cmd --permanent \
                 --add-port=${BIND_PORT}/tcp \
                 --add-port=${KCP_PORT}/udp \
                 --add-port=${QUIC_PORT}/udp \
                 --add-port=${DASH_PORT}/tcp \
-                || fatal_error "防火墙规则添加失败"
-            firewall-cmd --reload \
-                || fatal_error "防火墙重载失败"
+                || echo -e "${YELLOW}⚠️ 端口添加失败，可能已存在相同规则${NC}"
+            
+            echo -e "${GREEN}重载防火墙配置..."
+            firewall-cmd --reload || fatal_error "防火墙重载失败"
             ;;
         debian)
+            echo -e "${GREEN}添加UFW规则..."
             ufw allow ${BIND_PORT}/tcp \
-                || fatal_error "TCP端口开放失败"
+                || echo -e "${YELLOW}⚠️ TCP端口规则可能已存在${NC}"
             ufw allow ${KCP_PORT}/udp \
-                || fatal_error "KCP端口开放失败"
+                || echo -e "${YELLOW}⚠️ KCP端口规则可能已存在${NC}"
             ufw allow ${QUIC_PORT}/udp \
-                || fatal_error "QUIC端口开放失败"
+                || echo -e "${YELLOW}⚠️ QUIC端口规则可能已存在${NC}"
             ufw allow ${DASH_PORT}/tcp \
-                || fatal_error "Dashboard端口开放失败"
-            ufw reload \
-                || fatal_error "防火墙重载失败"
+                || echo -e "${YELLOW}⚠️ Dashboard端口规则可能已存在${NC}"
+            
+            echo -e "${GREEN}重载防火墙..."
+            ufw reload || fatal_error "防火墙重载失败"
             ;;
     esac
     echo -e "${GREEN}✅ 防火墙规则更新成功"
 }
 
-# 版本检测
-check_local_version() {
-    echo -e "${BLUE}[5/12] 检测本地FRP版本..."
-    if command -v frps &>/dev/null; then
-        LOCAL_VER=$(frps --version | awk '{print $3}')
-        echo -e "${GREEN}✅ 检测到已安装版本：v${LOCAL_VER}${NC}"
-        return 0
-    else
-        echo -e "${YELLOW}⚠️ 未检测到本地安装${NC}"
-        return 1
-    fi
-}
-
-# 获取最新版本
-get_latest_version() {
-    echo -e "${BLUE}获取最新版本信息..."
-    LATEST_VER=$(curl -s https://api.github.com/repos/fatedier/frp/releases/latest | grep tag_name | cut -d '"' -f 4)
-    [ -z "$LATEST_VER" ] && fatal_error "无法获取最新版本"
-    echo -e "${GREEN}最新版本：${LATEST_VER}${NC}"
-}
-
-# 智能下载
+# 版本检测与智能下载
 smart_download() {
     get_latest_version
     FRP_PACKAGE="frp_${LATEST_VER//v}_linux_${ARCH}.tar.gz"
@@ -262,7 +339,7 @@ detect_system
 install_dependencies
 
 # 选择访问方式
-echo -e "${BLUE}[3/12] 选择访问方式..."
+echo -e "${BLUE}[3/15] 选择访问方式..."
 echo -e "${YELLOW}请选择Dashboard访问类型："
 echo "1) 使用IP地址访问（自动生成nip.io域名）"
 echo "2) 使用域名访问"
@@ -288,22 +365,7 @@ fi
 generate_cert
 
 # 端口配置
-echo -e "${BLUE}[4/12] 端口配置..."
-configure_port() {
-    while true; do
-        read -p "$1 [默认$2]: " port
-        port=${port:-$2}
-        if [[ "$port" =~ ^[0-9]+$ ]] && [ $port -ge 1 -a $port -le 65535 ]; then
-            if check_port $port $3; then
-                eval $4=$port
-                break
-            fi
-        else
-            echo -e "${RED}无效端口号！${NC}"
-        fi
-    done
-}
-
+echo -e "${BLUE}[5/15] 端口配置..."
 configure_port "TCP绑定端口" 31943 tcp BIND_PORT
 configure_port "KCP绑定端口" $BIND_PORT udp KCP_PORT
 configure_port "QUIC绑定端口" 31944 udp QUIC_PORT
@@ -313,7 +375,7 @@ configure_port "Dashboard端口" 7500 tcp DASH_PORT
 configure_firewall
 
 # 下载流程
-echo -e "${BLUE}[5/12] 开始下载流程..."
+echo -e "${BLUE}[6/15] 开始下载流程..."
 if smart_download; then
     echo -e "${GREEN}✅ 下载完成，开始解压..."
     tar zxf "${FRP_PACKAGE}" || fatal_error "解压失败"
@@ -326,7 +388,7 @@ else
 fi
 
 # 安装配置
-echo -e "${BLUE}[6/12] 生成配置文件..."
+echo -e "${BLUE}[7/15] 生成配置文件..."
 mkdir -p "${CONFIG_DIR}/client"
 cat > "${CONFIG_DIR}/frps.toml" <<EOF
 [common]
@@ -354,7 +416,7 @@ log_max_days = 14
 EOF
 
 # 安装服务
-echo -e "${BLUE}[7/12] 安装系统服务..."
+echo -e "${BLUE}[8/15] 安装系统服务..."
 install -m 755 frps /usr/local/bin/ || fatal_error "可执行文件安装失败"
 
 cat > /etc/systemd/system/frps.service <<EOF
@@ -373,7 +435,7 @@ WantedBy=multi-user.target
 EOF
 
 # 生成凭证
-echo -e "${BLUE}[8/12] 生成安全凭证..."
+echo -e "${BLUE}[9/15] 生成安全凭证..."
 FRP_TOKEN=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1)
 DASH_USER="admin"
 DASH_PWD=$(openssl rand -base64 16 | tr -dc 'a-zA-Z0-9!@#$%^&*()_+' | fold -w 16 | head -n 1)
@@ -385,13 +447,13 @@ echo "${DASH_PWD}" > "${CONFIG_DIR}/env/dashboard_pwd"
 chmod 600 "${CONFIG_DIR}/env"/*
 
 # 启动服务
-echo -e "${BLUE}[9/12] 启动FRP服务..."
+echo -e "${BLUE}[10/15] 启动FRP服务..."
 systemctl daemon-reload
 systemctl enable frps
 systemctl restart frps || fatal_error "服务启动失败"
 
 # 验证安装
-echo -e "${BLUE}[10/12] 验证安装..."
+echo -e "${BLUE}[11/15] 验证安装..."
 sleep 3
 if ! systemctl is-active --quiet frps; then
     fatal_error "服务未正常运行"
